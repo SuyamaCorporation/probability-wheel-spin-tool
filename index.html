@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>確率ウィール スピン ツール</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
+  .bounce { animation: bounce 0.3s ease; }
+</style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-4">
+<div class="max-w-3xl mx-auto">
+  <h1 class="text-2xl font-bold text-center mb-1 text-violet-400">🎯 確率ウィール スピン ツール</h1>
+  <p class="text-center text-gray-400 text-sm mb-4">選択肢と重みを設定してルーレットを回す</p>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <!-- Left: Canvas wheel -->
+    <div>
+      <div class="bg-gray-800 rounded-lg p-2 mb-3">
+        <div class="relative flex justify-center">
+          <!-- Arrow indicator -->
+          <div class="absolute top-0 left-1/2 -translate-x-1/2 z-10 text-3xl leading-none" style="top:-2px">▼</div>
+          <canvas id="wheelCanvas" width="320" height="320" class="rounded-full"></canvas>
+        </div>
+      </div>
+      <button id="spinBtn"
+        class="w-full py-3 bg-violet-600 hover:bg-violet-500 rounded-lg text-xl font-bold transition-all active:scale-95"
+        aria-label="ルーレットを回す">🎲 スピン！</button>
+      <div id="resultToast" class="hidden mt-3 bg-violet-800 rounded-lg p-3 text-center text-xl font-bold"></div>
+      <button id="equalBtn"
+        class="mt-2 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+        aria-label="全選択肢を均等に設定">⚖️ 等分モード</button>
+    </div>
+
+    <!-- Right: Item management + stats -->
+    <div>
+      <div class="bg-gray-800 rounded-lg p-3 mb-3">
+        <div class="text-sm text-gray-400 mb-2">選択肢管理（最大10件）</div>
+        <div id="itemList" class="space-y-2 max-h-56 overflow-y-auto mb-2"></div>
+        <button id="addItemBtn"
+          class="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+          aria-label="選択肢を追加">+ 追加</button>
+      </div>
+      <div class="bg-gray-800 rounded-lg p-3">
+        <div class="text-sm text-gray-400 mb-2">当選回数統計</div>
+        <div id="statsDiv" class="space-y-1 max-h-48 overflow-y-auto"></div>
+        <button id="resetStatsBtn"
+          class="mt-2 text-xs text-red-400 hover:text-red-300"
+          aria-label="統計をリセット">統計リセット</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const COLORS = ['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#db2777','#0891b2','#65a30d','#ea580c','#7c3aed'];
+const PALETTE = ['#a78bfa','#60a5fa','#34d399','#fbbf24','#f87171','#f472b6','#22d3ee','#a3e635','#fb923c','#c084fc'];
+
+let items = [
+  { name: 'オプション A', weight: 3, wins: 0 },
+  { name: 'オプション B', weight: 2, wins: 0 },
+  { name: 'オプション C', weight: 1, wins: 0 },
+];
+
+const canvas = document.getElementById('wheelCanvas');
+const ctx = canvas.getContext('2d');
+let currentAngle = 0;
+let spinning = false;
+let animId = null;
+
+function totalWeight() { return items.reduce((s,i) => s + i.weight, 0); }
+
+function drawWheel(angle) {
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H/2, r = W/2 - 10;
+  ctx.clearRect(0,0,W,H);
+
+  const total = totalWeight();
+  if (total === 0 || !items.length) {
+    ctx.fillStyle = '#374151'; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+    return;
+  }
+
+  let startAngle = angle - Math.PI/2;
+  items.forEach((item, i) => {
+    const slice = (item.weight / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, startAngle, startAngle + slice);
+    ctx.closePath();
+    ctx.fillStyle = COLORS[i % COLORS.length];
+    ctx.fill();
+    ctx.strokeStyle = '#111827'; ctx.lineWidth = 2; ctx.stroke();
+
+    // Label
+    const midAngle = startAngle + slice / 2;
+    const lx = cx + Math.cos(midAngle) * r * 0.65;
+    const ly = cy + Math.sin(midAngle) * r * 0.65;
+    ctx.save();
+    ctx.translate(lx, ly);
+    ctx.rotate(midAngle + Math.PI/2);
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.min(14, 200 / items.length)}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    // Truncate long names
+    const maxLen = 10;
+    const label = item.name.length > maxLen ? item.name.slice(0, maxLen) + '…' : item.name;
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+
+    startAngle += slice;
+  });
+
+  // Center circle
+  ctx.beginPath(); ctx.arc(cx,cy,18,0,Math.PI*2); ctx.fillStyle='#1f2937'; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx,cy,12,0,Math.PI*2); ctx.fillStyle='#374151'; ctx.fill();
+}
+
+function getWinnerIdx(angle) {
+  const total = totalWeight();
+  // Arrow points up (angle 0 = up = -Math.PI/2 offset)
+  let norm = ((-angle + Math.PI/2) % (Math.PI*2) + Math.PI*2) % (Math.PI*2);
+  const ratio = norm / (Math.PI * 2);
+  let cumulative = 0;
+  for (let i = 0; i < items.length; i++) {
+    cumulative += items[i].weight / total;
+    if (ratio < cumulative) return i;
+  }
+  return items.length - 1;
+}
+
+document.getElementById('spinBtn').addEventListener('click', () => {
+  if (spinning || !items.length) return;
+  spinning = true;
+  document.getElementById('spinBtn').disabled = true;
+  document.getElementById('resultToast').classList.add('hidden');
+
+  const extraSpins = 5 + Math.random() * 5;
+  const targetAngle = currentAngle + extraSpins * Math.PI * 2 + Math.random() * Math.PI * 2;
+  const duration = 3000 + Math.random() * 1500;
+  const startTime = performance.now();
+  const startAngle = currentAngle;
+
+  function easeOut(t) { return 1 - Math.pow(1-t, 3); }
+
+  function frame(now) {
+    const elapsed = now - startTime;
+    const t = Math.min(elapsed / duration, 1);
+    currentAngle = startAngle + (targetAngle - startAngle) * easeOut(t);
+    drawWheel(currentAngle);
+    if (t < 1) {
+      animId = requestAnimationFrame(frame);
+    } else {
+      spinning = false;
+      document.getElementById('spinBtn').disabled = false;
+      const winIdx = getWinnerIdx(currentAngle);
+      items[winIdx].wins++;
+      renderStats();
+      const toast = document.getElementById('resultToast');
+      toast.textContent = '🏆 ' + items[winIdx].name + '!';
+      toast.classList.remove('hidden');
+      toast.classList.add('bounce');
+      setTimeout(() => toast.classList.remove('bounce'), 400);
+    }
+  }
+  requestAnimationFrame(frame);
+});
+
+document.getElementById('equalBtn').addEventListener('click', () => {
+  const w = Math.round(100 / items.length);
+  items.forEach(item => item.weight = w);
+  renderItemList();
+  drawWheel(currentAngle);
+});
+
+document.getElementById('addItemBtn').addEventListener('click', () => {
+  if (items.length >= 10) return;
+  items.push({ name: `オプション ${String.fromCharCode(65 + items.length)}`, weight: 1, wins: 0 });
+  renderItemList();
+  drawWheel(currentAngle);
+  renderStats();
+});
+
+document.getElementById('resetStatsBtn').addEventListener('click', () => {
+  items.forEach(item => item.wins = 0);
+  renderStats();
+});
+
+function renderItemList() {
+  const el = document.getElementById('itemList');
+  el.innerHTML = '';
+  items.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2';
+    // color dot
+    const dot = document.createElement('div');
+    dot.className = 'w-3 h-3 rounded-full flex-shrink-0';
+    dot.style.backgroundColor = COLORS[i % COLORS.length];
+
+    const nameLabel = document.createElement('label');
+    nameLabel.setAttribute('for', `item-name-${i}`);
+    nameLabel.className = 'sr-only';
+    nameLabel.textContent = `選択肢${i+1}の名前`;
+
+    const nameIn = document.createElement('input');
+    nameIn.type = 'text';
+    nameIn.id = `item-name-${i}`;
+    nameIn.value = item.name;
+    nameIn.className = 'flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-white focus:outline-none';
+    nameIn.setAttribute('aria-label', `選択肢${i+1}の名前`);
+    nameIn.addEventListener('input', () => { items[i].name = nameIn.value; drawWheel(currentAngle); renderStats(); });
+
+    const wtLabel = document.createElement('label');
+    wtLabel.setAttribute('for', `item-weight-${i}`);
+    wtLabel.className = 'sr-only';
+    wtLabel.textContent = `選択肢${i+1}の重み`;
+
+    const wtIn = document.createElement('input');
+    wtIn.type = 'number';
+    wtIn.id = `item-weight-${i}`;
+    wtIn.value = item.weight;
+    wtIn.min = 1; wtIn.max = 100;
+    wtIn.className = 'w-16 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-white focus:outline-none';
+    wtIn.setAttribute('aria-label', `選択肢${i+1}の重み`);
+    wtIn.addEventListener('input', () => { items[i].weight = Math.max(1, parseInt(wtIn.value)||1); drawWheel(currentAngle); });
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '✕';
+    delBtn.className = 'text-red-400 hover:text-red-300 text-sm flex-shrink-0';
+    delBtn.setAttribute('aria-label', `選択肢${i+1}を削除`);
+    delBtn.addEventListener('click', () => {
+      if (items.length <= 1) return;
+      items.splice(i, 1);
+      renderItemList(); drawWheel(currentAngle); renderStats();
+    });
+
+    row.appendChild(dot);
+    row.appendChild(nameLabel);
+    row.appendChild(nameIn);
+    row.appendChild(wtLabel);
+    row.appendChild(wtIn);
+    row.appendChild(delBtn);
+    el.appendChild(row);
+  });
+}
+
+function renderStats() {
+  const el = document.getElementById('statsDiv');
+  el.innerHTML = '';
+  const totalWins = items.reduce((s,i) => s + i.wins, 0);
+  items.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 text-sm';
+    const dot = document.createElement('span');
+    dot.className = 'w-3 h-3 rounded-full flex-shrink-0 inline-block';
+    dot.style.backgroundColor = COLORS[i % COLORS.length];
+    const name = document.createElement('span');
+    name.className = 'flex-1 truncate text-gray-300';
+    name.textContent = item.name;
+    const wins = document.createElement('span');
+    wins.className = 'text-yellow-300 font-mono';
+    wins.textContent = item.wins + '回';
+    const pct = document.createElement('span');
+    pct.className = 'text-gray-500 text-xs';
+    pct.textContent = totalWins ? `(${Math.round(item.wins/totalWins*100)}%)` : '';
+    row.appendChild(dot); row.appendChild(name); row.appendChild(wins); row.appendChild(pct);
+    el.appendChild(row);
+  });
+}
+
+renderItemList();
+renderStats();
+drawWheel(currentAngle);
+</script>
+</body>
+</html>
